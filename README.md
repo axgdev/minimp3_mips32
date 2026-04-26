@@ -84,8 +84,29 @@ You can ``#include`` ``minimp3.h`` in as many files as you like.
 Also you can use ``MINIMP3_ONLY_MP3`` define to strip MP1/MP2 decoding code.
 MINIMP3_ONLY_SIMD define controls generic (non SSE/NEON) code generation (always enabled on x64/arm64 targets).
 In case you do not want any platform-specific SIMD optimizations, you can define ``MINIMP3_NO_SIMD``.
+``MINIMP3_NO_ARMV6`` disables the optional ARMv6 saturating-clip helper even on ARM builds.
 MINIMP3_NONSTANDARD_BUT_LOGICAL define saves some code bytes, and enforces non-standard but logical behaviour of mono-stereo transition (rare case).
 MINIMP3_FLOAT_OUTPUT makes ``mp3dec_decode_frame()`` output to be float instead of short and additional function mp3dec_f32_to_s16 will be available for float->short conversion if needed.
+
+### MIPS32r1 soft-float profile
+
+This tree includes `minimp3_mips32r1_softfloat.h` and
+`Makefile.mips32r1-softfloat` for little-endian MIPS32r1 targets built with
+`-msoft-float`. The profile selects the smallest relevant feature set:
+
+```c
+#define MINIMP3_ONLY_MP3
+#define MINIMP3_NO_SIMD
+#define MINIMP3_NO_ARMV6
+#define MINIMP3_NO_STDIO
+#define MINIMP3_NONSTANDARD_BUT_LOGICAL
+#define MINIMP3_FIXED_POINT
+```
+
+It also defines `MINIMP3_FIXED_POINT`, which switches the internal Layer III
+dequantization, IMDCT, antialias, stereo, and synthesis paths to scaled integer
+arithmetic. The MIPS32r1 soft-float build is expected to contain no soft-float
+helper references such as `__mulsf3`, `__addsf3`, or `__fixsfsi`.
 
 Then. we decode the input stream frame-by-frame:
 

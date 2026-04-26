@@ -10,6 +10,12 @@
 
 #define MINIMP3_MAX_SAMPLES_PER_FRAME (1152*2)
 
+#ifdef MINIMP3_FIXED_POINT
+typedef int32_t mp3d_real_t;
+#else
+typedef float mp3d_real_t;
+#endif
+
 typedef struct
 {
     int frame_bytes, frame_offset, channels, hz, layer, bitrate_kbps;
@@ -17,7 +23,7 @@ typedef struct
 
 typedef struct
 {
-    float mdct_overlap[2][9*32], qmf_state[15*2*32];
+    mp3d_real_t mdct_overlap[2][9*32], qmf_state[15*2*32];
     int reserv, free_format_bytes;
     unsigned char header[4], reserv_buf[511];
 } mp3dec_t;
@@ -27,6 +33,9 @@ extern "C" {
 #endif /* __cplusplus */
 
 void mp3dec_init(mp3dec_t *dec);
+#if defined(MINIMP3_FIXED_POINT) && defined(MINIMP3_FLOAT_OUTPUT)
+#error "MINIMP3_FIXED_POINT does not support MINIMP3_FLOAT_OUTPUT"
+#endif
 #ifndef MINIMP3_FLOAT_OUTPUT
 typedef int16_t mp3d_sample_t;
 #else /* MINIMP3_FLOAT_OUTPUT */
@@ -45,6 +54,27 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
 
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef MINIMP3_FIXED_POINT
+#define MP3D_FRAC_BITS 12
+#define MP3D_ONE ((mp3d_real_t)(1 << MP3D_FRAC_BITS))
+#define MP3D_FIX(x) ((mp3d_real_t)((x) >= 0 ? ((x) * (double)(1 << MP3D_FRAC_BITS) + 0.5) : ((x) * (double)(1 << MP3D_FRAC_BITS) - 0.5)))
+#define MP3D_MUL(a, b) ((mp3d_real_t)(((int64_t)(a) * (int64_t)(b)) >> MP3D_FRAC_BITS))
+#define MP3D_MUL_S(a, b) MP3D_MUL((a), MP3D_FIX(b))
+#define MP3D_DIV(a, b) ((mp3d_real_t)(((int32_t)(a) << MP3D_FRAC_BITS) / (b)))
+#define MP3D_FROM_INT(x) ((mp3d_real_t)((x) << MP3D_FRAC_BITS))
+#define MP3D_TO_INT(x) ((int32_t)((x) >> MP3D_FRAC_BITS))
+#define MP3D_SCALE_DOWN(a, bits) ((a) >> (bits))
+#else
+#define MP3D_ONE MP3D_FIX(1.0)
+#define MP3D_FIX(x) (x##f)
+#define MP3D_MUL(a, b) ((a) * (b))
+#define MP3D_MUL_S(a, b) ((a) * (b##f))
+#define MP3D_DIV(a, b) ((a) / (b))
+#define MP3D_FROM_INT(x) ((mp3d_real_t)(x))
+#define MP3D_TO_INT(x) ((int32_t)(x))
+#define MP3D_SCALE_DOWN(a, bits) ((a) / (mp3d_real_t)(1 << (bits)))
+#endif
 
 #define MAX_FREE_FORMAT_FRAME_SIZE  2304    /* more than ISO spec's */
 #ifndef MAX_FRAME_SYNC_MATCHES
@@ -191,7 +221,7 @@ static int have_simd()
 #define HAVE_SIMD 0
 #endif /* !defined(MINIMP3_NO_SIMD) */
 
-#if defined(__ARM_ARCH) && (__ARM_ARCH >= 6) && !defined(__aarch64__) && !defined(_M_ARM64)
+#if !defined(MINIMP3_NO_ARMV6) && defined(__ARM_ARCH) && (__ARM_ARCH >= 6) && !defined(__aarch64__) && !defined(_M_ARM64)
 #define HAVE_ARMV6 1
 static __inline__ __attribute__((always_inline)) int32_t minimp3_clip_int16_arm(int32_t a)
 {
@@ -211,7 +241,7 @@ typedef struct
 
 typedef struct
 {
-    float scf[3*64];
+    mp3d_real_t scf[3*64];
     uint8_t total_bands, stereo_bands, bitalloc[64], scfcod[64];
 } L12_scale_info;
 
@@ -234,7 +264,7 @@ typedef struct
     bs_t bs;
     uint8_t maindata[MAX_BITRESERVOIR_BYTES + MAX_L3_FRAME_PAYLOAD_BYTES];
     L3_gr_info_t gr_info[4];
-    float grbuf[2][576], scf[40], syn[18 + 15][2*32];
+    mp3d_real_t grbuf[2][576], scf[40], syn[18 + 15][2*32];
     uint8_t ist_pos[2][39];
 } mp3dec_scratch_t;
 
@@ -359,10 +389,10 @@ static const L12_subband_alloc_t *L12_subband_alloc_table(const uint8_t *hdr, L1
     return alloc;
 }
 
-static void L12_read_scalefactors(bs_t *bs, uint8_t *pba, uint8_t *scfcod, int bands, float *scf)
+static void L12_read_scalefactors(bs_t *bs, uint8_t *pba, uint8_t *scfcod, int bands, mp3d_real_t *scf)
 {
-    static const float g_deq_L12[18*3] = {
-#define DQ(x) 9.53674316e-07f/x, 7.56931807e-07f/x, 6.00777173e-07f/x
+    static const mp3d_real_t g_deq_L12[18*3] = {
+#define DQ(x) MP3D_FIX(0.000000953674316)/x, MP3D_FIX(0.000000756931807)/x, MP3D_FIX(0.000000600777173)/x
         DQ(3),DQ(7),DQ(15),DQ(31),DQ(63),DQ(127),DQ(255),DQ(511),DQ(1023),DQ(2047),DQ(4095),DQ(8191),DQ(16383),DQ(32767),DQ(65535),DQ(3),DQ(5),DQ(9)
     };
     int i, m;
@@ -431,12 +461,12 @@ static void L12_read_scale_info(const uint8_t *hdr, bs_t *bs, L12_scale_info *sc
     }
 }
 
-static int L12_dequantize_granule(float *grbuf, bs_t *bs, L12_scale_info *sci, int group_size)
+static int L12_dequantize_granule(mp3d_real_t *grbuf, bs_t *bs, L12_scale_info *sci, int group_size)
 {
     int i, j, k, choff = 576;
     for (j = 0; j < 4; j++)
     {
-        float *dst = grbuf + group_size*j;
+        mp3d_real_t *dst = grbuf + group_size*j;
         for (i = 0; i < 2*sci->total_bands; i++)
         {
             int ba = sci->bitalloc[i];
@@ -447,7 +477,7 @@ static int L12_dequantize_granule(float *grbuf, bs_t *bs, L12_scale_info *sci, i
                     int half = (1 << (ba - 1)) - 1;
                     for (k = 0; k < group_size; k++)
                     {
-                        dst[k] = (float)((int)get_bits(bs, ba) - half);
+                        dst[k] = (mp3d_real_t)((int)get_bits(bs, ba) - half);
                     }
                 } else
                 {
@@ -455,7 +485,7 @@ static int L12_dequantize_granule(float *grbuf, bs_t *bs, L12_scale_info *sci, i
                     unsigned code = get_bits(bs, mod + 2 - (mod >> 3));  /* 5, 7, 10 */
                     for (k = 0; k < group_size; k++, code /= mod)
                     {
-                        dst[k] = (float)((int)(code % mod - mod/2));
+                        dst[k] = (mp3d_real_t)((int)(code % mod - mod/2));
                     }
                 }
             }
@@ -466,10 +496,10 @@ static int L12_dequantize_granule(float *grbuf, bs_t *bs, L12_scale_info *sci, i
     return group_size*4;
 }
 
-static void L12_apply_scf_384(L12_scale_info *sci, const float *scf, float *dst)
+static void L12_apply_scf_384(L12_scale_info *sci, const mp3d_real_t *scf, mp3d_real_t *dst)
 {
     int i, k;
-    memcpy(dst + 576 + sci->stereo_bands*18, dst + sci->stereo_bands*18, (sci->total_bands - sci->stereo_bands)*18*sizeof(float));
+    memcpy(dst + 576 + sci->stereo_bands*18, dst + sci->stereo_bands*18, (sci->total_bands - sci->stereo_bands)*18*sizeof(mp3d_real_t));
     for (i = 0; i < sci->total_bands; i++, dst += 18, scf += 6)
     {
         for (k = 0; k < 12; k++)
@@ -639,19 +669,19 @@ static void L3_read_scalefactors(uint8_t *scf, uint8_t *ist_pos, const uint8_t *
     scf[0] = scf[1] = scf[2] = 0;
 }
 
-static float L3_ldexp_q2(float y, int exp_q2)
+static mp3d_real_t L3_ldexp_q2(mp3d_real_t y, int exp_q2)
 {
-    static const float g_expfrac[4] = { 9.31322575e-10f,7.83145814e-10f,6.58544508e-10f,5.53767716e-10f };
+    static const mp3d_real_t g_expfrac_q30[4] = { MP3D_FIX(1.0),MP3D_FIX(0.84089642),MP3D_FIX(0.70710678),MP3D_FIX(0.59460356) };
     int e;
     do
     {
         e = MINIMP3_MIN(30*4, exp_q2);
-        y *= g_expfrac[e & 3]*(1 << 30 >> (e >> 2));
+        y = MP3D_MUL(y, MP3D_SCALE_DOWN(g_expfrac_q30[e & 3], e >> 2));
     } while ((exp_q2 -= e) > 0);
     return y;
 }
 
-static void L3_decode_scalefactors(const uint8_t *hdr, uint8_t *ist_pos, bs_t *bs, const L3_gr_info_t *gr, float *scf, int ch)
+static void L3_decode_scalefactors(const uint8_t *hdr, uint8_t *ist_pos, bs_t *bs, const L3_gr_info_t *gr, mp3d_real_t *scf, int ch)
 {
     static const uint8_t g_scf_partitions[3][28] = {
         { 6,5,5, 5,6,5,5,5,6,5, 7,3,11,10,0,0, 7, 7, 7,0, 6, 6,6,3, 8, 8,5,0 },
@@ -661,7 +691,7 @@ static void L3_decode_scalefactors(const uint8_t *hdr, uint8_t *ist_pos, bs_t *b
     const uint8_t *scf_partition = g_scf_partitions[!!gr->n_short_sfb + !gr->n_long_sfb];
     uint8_t scf_size[4], iscf[40];
     int i, scf_shift = gr->scalefac_scale + 1, gain_exp, scfsi = gr->scfsi;
-    float gain;
+    mp3d_real_t gain;
 
     if (HDR_TEST_MPEG1(hdr))
     {
@@ -706,21 +736,21 @@ static void L3_decode_scalefactors(const uint8_t *hdr, uint8_t *ist_pos, bs_t *b
     }
 
     gain_exp = gr->global_gain + BITS_DEQUANTIZER_OUT*4 - 210 - (HDR_IS_MS_STEREO(hdr) ? 2 : 0);
-    gain = L3_ldexp_q2(1 << (MAX_SCFI/4),  MAX_SCFI - gain_exp);
+    gain = L3_ldexp_q2(MP3D_FROM_INT(1 << (MAX_SCFI/4)),  MAX_SCFI - gain_exp);
     for (i = 0; i < (int)(gr->n_long_sfb + gr->n_short_sfb); i++)
     {
         scf[i] = L3_ldexp_q2(gain, iscf[i] << scf_shift);
     }
 }
 
-static const float g_pow43[129 + 16] = {
-    0,-1,-2.519842f,-4.326749f,-6.349604f,-8.549880f,-10.902724f,-13.390518f,-16.000000f,-18.720754f,-21.544347f,-24.463781f,-27.473142f,-30.567351f,-33.741992f,-36.993181f,
-    0,1,2.519842f,4.326749f,6.349604f,8.549880f,10.902724f,13.390518f,16.000000f,18.720754f,21.544347f,24.463781f,27.473142f,30.567351f,33.741992f,36.993181f,40.317474f,43.711787f,47.173345f,50.699631f,54.288352f,57.937408f,61.644865f,65.408941f,69.227979f,73.100443f,77.024898f,81.000000f,85.024491f,89.097188f,93.216975f,97.382800f,101.593667f,105.848633f,110.146801f,114.487321f,118.869381f,123.292209f,127.755065f,132.257246f,136.798076f,141.376907f,145.993119f,150.646117f,155.335327f,160.060199f,164.820202f,169.614826f,174.443577f,179.305980f,184.201575f,189.129918f,194.090580f,199.083145f,204.107210f,209.162385f,214.248292f,219.364564f,224.510845f,229.686789f,234.892058f,240.126328f,245.389280f,250.680604f,256.000000f,261.347174f,266.721841f,272.123723f,277.552547f,283.008049f,288.489971f,293.998060f,299.532071f,305.091761f,310.676898f,316.287249f,321.922592f,327.582707f,333.267377f,338.976394f,344.709550f,350.466646f,356.247482f,362.051866f,367.879608f,373.730522f,379.604427f,385.501143f,391.420496f,397.362314f,403.326427f,409.312672f,415.320884f,421.350905f,427.402579f,433.475750f,439.570269f,445.685987f,451.822757f,457.980436f,464.158883f,470.357960f,476.577530f,482.817459f,489.077615f,495.357868f,501.658090f,507.978156f,514.317941f,520.677324f,527.056184f,533.454404f,539.871867f,546.308458f,552.764065f,559.238575f,565.731879f,572.243870f,578.774440f,585.323483f,591.890898f,598.476581f,605.080431f,611.702349f,618.342238f,625.000000f,631.675540f,638.368763f,645.079578f
+static const mp3d_real_t g_pow43[129 + 16] = {
+    0,-MP3D_ONE,MP3D_FIX(-2.519842),MP3D_FIX(-4.326749),MP3D_FIX(-6.349604),MP3D_FIX(-8.549880),MP3D_FIX(-10.902724),MP3D_FIX(-13.390518),MP3D_FIX(-16.000000),MP3D_FIX(-18.720754),MP3D_FIX(-21.544347),MP3D_FIX(-24.463781),MP3D_FIX(-27.473142),MP3D_FIX(-30.567351),MP3D_FIX(-33.741992),MP3D_FIX(-36.993181),
+    0,MP3D_ONE,MP3D_FIX(2.519842),MP3D_FIX(4.326749),MP3D_FIX(6.349604),MP3D_FIX(8.549880),MP3D_FIX(10.902724),MP3D_FIX(13.390518),MP3D_FIX(16.000000),MP3D_FIX(18.720754),MP3D_FIX(21.544347),MP3D_FIX(24.463781),MP3D_FIX(27.473142),MP3D_FIX(30.567351),MP3D_FIX(33.741992),MP3D_FIX(36.993181),MP3D_FIX(40.317474),MP3D_FIX(43.711787),MP3D_FIX(47.173345),MP3D_FIX(50.699631),MP3D_FIX(54.288352),MP3D_FIX(57.937408),MP3D_FIX(61.644865),MP3D_FIX(65.408941),MP3D_FIX(69.227979),MP3D_FIX(73.100443),MP3D_FIX(77.024898),MP3D_FIX(81.000000),MP3D_FIX(85.024491),MP3D_FIX(89.097188),MP3D_FIX(93.216975),MP3D_FIX(97.382800),MP3D_FIX(101.593667),MP3D_FIX(105.848633),MP3D_FIX(110.146801),MP3D_FIX(114.487321),MP3D_FIX(118.869381),MP3D_FIX(123.292209),MP3D_FIX(127.755065),MP3D_FIX(132.257246),MP3D_FIX(136.798076),MP3D_FIX(141.376907),MP3D_FIX(145.993119),MP3D_FIX(150.646117),MP3D_FIX(155.335327),MP3D_FIX(160.060199),MP3D_FIX(164.820202),MP3D_FIX(169.614826),MP3D_FIX(174.443577),MP3D_FIX(179.305980),MP3D_FIX(184.201575),MP3D_FIX(189.129918),MP3D_FIX(194.090580),MP3D_FIX(199.083145),MP3D_FIX(204.107210),MP3D_FIX(209.162385),MP3D_FIX(214.248292),MP3D_FIX(219.364564),MP3D_FIX(224.510845),MP3D_FIX(229.686789),MP3D_FIX(234.892058),MP3D_FIX(240.126328),MP3D_FIX(245.389280),MP3D_FIX(250.680604),MP3D_FIX(256.000000),MP3D_FIX(261.347174),MP3D_FIX(266.721841),MP3D_FIX(272.123723),MP3D_FIX(277.552547),MP3D_FIX(283.008049),MP3D_FIX(288.489971),MP3D_FIX(293.998060),MP3D_FIX(299.532071),MP3D_FIX(305.091761),MP3D_FIX(310.676898),MP3D_FIX(316.287249),MP3D_FIX(321.922592),MP3D_FIX(327.582707),MP3D_FIX(333.267377),MP3D_FIX(338.976394),MP3D_FIX(344.709550),MP3D_FIX(350.466646),MP3D_FIX(356.247482),MP3D_FIX(362.051866),MP3D_FIX(367.879608),MP3D_FIX(373.730522),MP3D_FIX(379.604427),MP3D_FIX(385.501143),MP3D_FIX(391.420496),MP3D_FIX(397.362314),MP3D_FIX(403.326427),MP3D_FIX(409.312672),MP3D_FIX(415.320884),MP3D_FIX(421.350905),MP3D_FIX(427.402579),MP3D_FIX(433.475750),MP3D_FIX(439.570269),MP3D_FIX(445.685987),MP3D_FIX(451.822757),MP3D_FIX(457.980436),MP3D_FIX(464.158883),MP3D_FIX(470.357960),MP3D_FIX(476.577530),MP3D_FIX(482.817459),MP3D_FIX(489.077615),MP3D_FIX(495.357868),MP3D_FIX(501.658090),MP3D_FIX(507.978156),MP3D_FIX(514.317941),MP3D_FIX(520.677324),MP3D_FIX(527.056184),MP3D_FIX(533.454404),MP3D_FIX(539.871867),MP3D_FIX(546.308458),MP3D_FIX(552.764065),MP3D_FIX(559.238575),MP3D_FIX(565.731879),MP3D_FIX(572.243870),MP3D_FIX(578.774440),MP3D_FIX(585.323483),MP3D_FIX(591.890898),MP3D_FIX(598.476581),MP3D_FIX(605.080431),MP3D_FIX(611.702349),MP3D_FIX(618.342238),MP3D_FIX(625.000000),MP3D_FIX(631.675540),MP3D_FIX(638.368763),MP3D_FIX(645.079578)
 };
 
-static float L3_pow_43(int x)
+static mp3d_real_t L3_pow_43(int x)
 {
-    float frac;
+    mp3d_real_t frac;
     int sign, mult = 256;
 
     if (x < 129)
@@ -735,11 +765,12 @@ static float L3_pow_43(int x)
     }
 
     sign = 2*x & 64;
-    frac = (float)((x & 63) - sign) / ((x & ~63) + sign);
-    return g_pow43[16 + ((x + sign) >> 6)]*(1.f + frac*((4.f/3) + frac*(2.f/9)))*mult;
+    frac = MP3D_DIV(MP3D_FROM_INT((x & 63) - sign), (x & ~63) + sign);
+    return MP3D_MUL(g_pow43[16 + ((x + sign) >> 6)],
+        MP3D_FIX(1.) + MP3D_MUL(frac, MP3D_FIX(4.)/3 + MP3D_MUL(frac, MP3D_FIX(2.)/9)))*mult;
 }
 
-static void L3_huffman(float *dst, bs_t *bs, const L3_gr_info_t *gr_info, const float *scf, int layer3gr_limit)
+static void L3_huffman(mp3d_real_t *dst, bs_t *bs, const L3_gr_info_t *gr_info, const mp3d_real_t *scf, int layer3gr_limit)
 {
     static const int16_t tabs[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         785,785,785,785,784,784,784,784,513,513,513,513,513,513,513,513,256,256,256,256,256,256,256,256,256,256,256,256,256,256,256,256,
@@ -767,7 +798,7 @@ static void L3_huffman(float *dst, bs_t *bs, const L3_gr_info_t *gr_info, const 
 #define CHECK_BITS    while (bs_sh >= 0) { bs_cache |= (uint32_t)*bs_next_ptr++ << bs_sh; bs_sh -= 8; }
 #define BSPOS         ((bs_next_ptr - bs->buf)*8 - 24 + bs_sh)
 
-    float one = 0.0f;
+    mp3d_real_t one = MP3D_FIX(0.0);
     int ireg = 0, big_val_cnt = gr_info->big_values;
     const uint8_t *sfb = gr_info->sfbtab;
     const uint8_t *bs_next_ptr = bs->buf + bs->pos/8;
@@ -808,10 +839,10 @@ static void L3_huffman(float *dst, bs_t *bs, const L3_gr_info_t *gr_info, const 
                             lsb += PEEK_BITS(linbits);
                             FLUSH_BITS(linbits);
                             CHECK_BITS;
-                            *dst = one*L3_pow_43(lsb)*((int32_t)bs_cache < 0 ? -1: 1);
+                            *dst = MP3D_MUL(one, L3_pow_43(lsb))*((int32_t)bs_cache < 0 ? -1: 1);
                         } else
                         {
-                            *dst = g_pow43[16 + lsb - 16*(bs_cache >> 31)]*one;
+                            *dst = MP3D_MUL(g_pow43[16 + lsb - 16*(bs_cache >> 31)], one);
                         }
                         FLUSH_BITS(lsb ? 1 : 0);
                     }
@@ -840,7 +871,7 @@ static void L3_huffman(float *dst, bs_t *bs, const L3_gr_info_t *gr_info, const 
                     for (j = 0; j < 2; j++, dst++, leaf >>= 4)
                     {
                         int lsb = leaf & 0x0F;
-                        *dst = g_pow43[16 + lsb - 16*(bs_cache >> 31)]*one;
+                        *dst = MP3D_MUL(g_pow43[16 + lsb - 16*(bs_cache >> 31)], one);
                         FLUSH_BITS(lsb ? 1 : 0);
                     }
                     CHECK_BITS;
@@ -876,10 +907,10 @@ static void L3_huffman(float *dst, bs_t *bs, const L3_gr_info_t *gr_info, const 
     bs->pos = layer3gr_limit;
 }
 
-static void L3_midside_stereo(float *left, int n)
+static void L3_midside_stereo(mp3d_real_t *left, int n)
 {
     int i = 0;
-    float *right = left + 576;
+    mp3d_real_t *right = left + 576;
 #if HAVE_SIMD
     if (have_simd())
     {
@@ -901,24 +932,24 @@ static void L3_midside_stereo(float *left, int n)
 #endif /* HAVE_SIMD */
     for (; i < n; i++)
     {
-        float a = left[i];
-        float b = right[i];
+        mp3d_real_t a = left[i];
+        mp3d_real_t b = right[i];
         left[i] = a + b;
         right[i] = a - b;
     }
 }
 
-static void L3_intensity_stereo_band(float *left, int n, float kl, float kr)
+static void L3_intensity_stereo_band(mp3d_real_t *left, int n, mp3d_real_t kl, mp3d_real_t kr)
 {
     int i;
     for (i = 0; i < n; i++)
     {
-        left[i + 576] = left[i]*kr;
-        left[i] = left[i]*kl;
+        left[i + 576] = MP3D_MUL(left[i], kr);
+        left[i] = MP3D_MUL(left[i], kl);
     }
 }
 
-static void L3_stereo_top_band(const float *right, const uint8_t *sfb, int nbands, int max_band[3])
+static void L3_stereo_top_band(const mp3d_real_t *right, const uint8_t *sfb, int nbands, int max_band[3])
 {
     int i, k;
 
@@ -938,9 +969,9 @@ static void L3_stereo_top_band(const float *right, const uint8_t *sfb, int nband
     }
 }
 
-static void L3_stereo_process(float *left, const uint8_t *ist_pos, const uint8_t *sfb, const uint8_t *hdr, int max_band[3], int mpeg2_sh)
+static void L3_stereo_process(mp3d_real_t *left, const uint8_t *ist_pos, const uint8_t *sfb, const uint8_t *hdr, int max_band[3], int mpeg2_sh)
 {
-    static const float g_pan[7*2] = { 0,1,0.21132487f,0.78867513f,0.36602540f,0.63397460f,0.5f,0.5f,0.63397460f,0.36602540f,0.78867513f,0.21132487f,1,0 };
+    static const mp3d_real_t g_pan[7*2] = { 0,MP3D_ONE,MP3D_FIX(0.21132487),MP3D_FIX(0.78867513),MP3D_FIX(0.36602540),MP3D_FIX(0.63397460),MP3D_FIX(0.5),MP3D_FIX(0.5),MP3D_FIX(0.63397460),MP3D_FIX(0.36602540),MP3D_FIX(0.78867513),MP3D_FIX(0.21132487),MP3D_ONE,0 };
     unsigned i, max_pos = HDR_TEST_MPEG1(hdr) ? 7 : 64;
 
     for (i = 0; sfb[i]; i++)
@@ -948,22 +979,22 @@ static void L3_stereo_process(float *left, const uint8_t *ist_pos, const uint8_t
         unsigned ipos = ist_pos[i];
         if ((int)i > max_band[i % 3] && ipos < max_pos)
         {
-            float kl, kr, s = HDR_TEST_MS_STEREO(hdr) ? 1.41421356f : 1;
+            mp3d_real_t kl, kr, s = HDR_TEST_MS_STEREO(hdr) ? MP3D_FIX(1.41421356) : MP3D_ONE;
             if (HDR_TEST_MPEG1(hdr))
             {
                 kl = g_pan[2*ipos];
                 kr = g_pan[2*ipos + 1];
             } else
             {
-                kl = 1;
-                kr = L3_ldexp_q2(1, (ipos + 1) >> 1 << mpeg2_sh);
+                kl = MP3D_ONE;
+                kr = L3_ldexp_q2(MP3D_ONE, (ipos + 1) >> 1 << mpeg2_sh);
                 if (ipos & 1)
                 {
                     kl = kr;
-                    kr = 1;
+                    kr = MP3D_ONE;
                 }
             }
-            L3_intensity_stereo_band(left, sfb[i], kl*s, kr*s);
+            L3_intensity_stereo_band(left, sfb[i], MP3D_MUL(kl, s), MP3D_MUL(kr, s));
         } else if (HDR_TEST_MS_STEREO(hdr))
         {
             L3_midside_stereo(left, sfb[i]);
@@ -972,7 +1003,7 @@ static void L3_stereo_process(float *left, const uint8_t *ist_pos, const uint8_t
     }
 }
 
-static void L3_intensity_stereo(float *left, uint8_t *ist_pos, const L3_gr_info_t *gr, const uint8_t *hdr)
+static void L3_intensity_stereo(mp3d_real_t *left, uint8_t *ist_pos, const L3_gr_info_t *gr, const uint8_t *hdr)
 {
     int max_band[3], n_sfb = gr->n_long_sfb + gr->n_short_sfb;
     int i, max_blocks = gr->n_short_sfb ? 3 : 1;
@@ -992,10 +1023,10 @@ static void L3_intensity_stereo(float *left, uint8_t *ist_pos, const L3_gr_info_
     L3_stereo_process(left, ist_pos, gr->sfbtab, hdr, max_band, gr[1].scalefac_compress & 1);
 }
 
-static void L3_reorder(float *grbuf, float *scratch, const uint8_t *sfb)
+static void L3_reorder(mp3d_real_t *grbuf, mp3d_real_t *scratch, const uint8_t *sfb)
 {
     int i, len;
-    float *src = grbuf, *dst = scratch;
+    mp3d_real_t *src = grbuf, *dst = scratch;
 
     for (;0 != (len = *sfb); sfb += 3, src += 2*len)
     {
@@ -1006,14 +1037,14 @@ static void L3_reorder(float *grbuf, float *scratch, const uint8_t *sfb)
             *dst++ = src[2*len];
         }
     }
-    memcpy(grbuf, scratch, (dst - scratch)*sizeof(float));
+    memcpy(grbuf, scratch, (dst - scratch)*sizeof(mp3d_real_t));
 }
 
-static void L3_antialias(float *grbuf, int nbands)
+static void L3_antialias(mp3d_real_t *grbuf, int nbands)
 {
-    static const float g_aa[2][8] = {
-        {0.85749293f,0.88174200f,0.94962865f,0.98331459f,0.99551782f,0.99916056f,0.99989920f,0.99999316f},
-        {0.51449576f,0.47173197f,0.31337745f,0.18191320f,0.09457419f,0.04096558f,0.01419856f,0.00369997f}
+    static const mp3d_real_t g_aa[2][8] = {
+        {MP3D_FIX(0.85749293),MP3D_FIX(0.88174200),MP3D_FIX(0.94962865),MP3D_FIX(0.98331459),MP3D_FIX(0.99551782),MP3D_FIX(0.99916056),MP3D_FIX(0.99989920),MP3D_FIX(0.99999316)},
+        {MP3D_FIX(0.51449576),MP3D_FIX(0.47173197),MP3D_FIX(0.31337745),MP3D_FIX(0.18191320),MP3D_FIX(0.09457419),MP3D_FIX(0.04096558),MP3D_FIX(0.01419856),MP3D_FIX(0.00369997)}
     };
 
     for (; nbands > 0; nbands--, grbuf += 18)
@@ -1035,28 +1066,28 @@ static void L3_antialias(float *grbuf, int nbands)
 #ifndef MINIMP3_ONLY_SIMD
         for(; i < 8; i++)
         {
-            float u = grbuf[18 + i];
-            float d = grbuf[17 - i];
-            grbuf[18 + i] = u*g_aa[0][i] - d*g_aa[1][i];
-            grbuf[17 - i] = u*g_aa[1][i] + d*g_aa[0][i];
+            mp3d_real_t u = grbuf[18 + i];
+            mp3d_real_t d = grbuf[17 - i];
+            grbuf[18 + i] = MP3D_MUL(u, g_aa[0][i]) - MP3D_MUL(d, g_aa[1][i]);
+            grbuf[17 - i] = MP3D_MUL(u, g_aa[1][i]) + MP3D_MUL(d, g_aa[0][i]);
         }
 #endif /* MINIMP3_ONLY_SIMD */
     }
 }
 
-static void L3_dct3_9(float *y)
+static void L3_dct3_9(mp3d_real_t *y)
 {
-    float s0, s1, s2, s3, s4, s5, s6, s7, s8, t0, t2, t4;
+    mp3d_real_t s0, s1, s2, s3, s4, s5, s6, s7, s8, t0, t2, t4;
 
     s0 = y[0]; s2 = y[2]; s4 = y[4]; s6 = y[6]; s8 = y[8];
-    t0 = s0 + s6*0.5f;
+    t0 = s0 + MP3D_MUL_S(s6, 0.5);
     s0 -= s6;
-    t4 = (s4 + s2)*0.93969262f;
-    t2 = (s8 + s2)*0.76604444f;
-    s6 = (s4 - s8)*0.17364818f;
+    t4 = MP3D_MUL_S(s4 + s2, 0.93969262);
+    t2 = MP3D_MUL_S(s8 + s2, 0.76604444);
+    s6 = MP3D_MUL_S(s4 - s8, 0.17364818);
     s4 += s8 - s2;
 
-    s2 = s0 - s4*0.5f;
+    s2 = s0 - MP3D_MUL_S(s4, 0.5);
     y[4] = s4 + s0;
     s8 = t0 - t2 + s6;
     s0 = t0 - t4 + t2;
@@ -1064,11 +1095,11 @@ static void L3_dct3_9(float *y)
 
     s1 = y[1]; s3 = y[3]; s5 = y[5]; s7 = y[7];
 
-    s3 *= 0.86602540f;
-    t0 = (s5 + s1)*0.98480775f;
-    t4 = (s5 - s7)*0.34202014f;
-    t2 = (s1 + s7)*0.64278761f;
-    s1 = (s1 - s5 - s7)*0.86602540f;
+    s3 = MP3D_MUL_S(s3, 0.86602540);
+    t0 = MP3D_MUL_S(s5 + s1, 0.98480775);
+    t4 = MP3D_MUL_S(s5 - s7, 0.34202014);
+    t2 = MP3D_MUL_S(s1 + s7, 0.64278761);
+    s1 = MP3D_MUL_S(s1 - s5 - s7, 0.86602540);
 
     s5 = t0 - s3 - t2;
     s7 = t4 - s3 - t0;
@@ -1084,16 +1115,16 @@ static void L3_dct3_9(float *y)
     y[8] = s4 + s7;
 }
 
-static void L3_imdct36(float *grbuf, float *overlap, const float *window, int nbands)
+static void L3_imdct36(mp3d_real_t *grbuf, mp3d_real_t *overlap, const mp3d_real_t *window, int nbands)
 {
     int i, j;
-    static const float g_twid9[18] = {
-        0.73727734f,0.79335334f,0.84339145f,0.88701083f,0.92387953f,0.95371695f,0.97629601f,0.99144486f,0.99904822f,0.67559021f,0.60876143f,0.53729961f,0.46174861f,0.38268343f,0.30070580f,0.21643961f,0.13052619f,0.04361938f
+    static const mp3d_real_t g_twid9[18] = {
+        MP3D_FIX(0.73727734),MP3D_FIX(0.79335334),MP3D_FIX(0.84339145),MP3D_FIX(0.88701083),MP3D_FIX(0.92387953),MP3D_FIX(0.95371695),MP3D_FIX(0.97629601),MP3D_FIX(0.99144486),MP3D_FIX(0.99904822),MP3D_FIX(0.67559021),MP3D_FIX(0.60876143),MP3D_FIX(0.53729961),MP3D_FIX(0.46174861),MP3D_FIX(0.38268343),MP3D_FIX(0.30070580),MP3D_FIX(0.21643961),MP3D_FIX(0.13052619),MP3D_FIX(0.04361938)
     };
 
     for (j = 0; j < nbands; j++, grbuf += 18, overlap += 9)
     {
-        float co[9], si[9];
+        mp3d_real_t co[9], si[9];
         co[0] = -grbuf[0];
         si[0] = grbuf[17];
         for (i = 0; i < 4; i++)
@@ -1132,28 +1163,28 @@ static void L3_imdct36(float *grbuf, float *overlap, const float *window, int nb
 #endif /* HAVE_SIMD */
         for (; i < 9; i++)
         {
-            float ovl  = overlap[i];
-            float sum  = co[i]*g_twid9[9 + i] + si[i]*g_twid9[0 + i];
-            overlap[i] = co[i]*g_twid9[0 + i] - si[i]*g_twid9[9 + i];
-            grbuf[i]      = ovl*window[0 + i] - sum*window[9 + i];
-            grbuf[17 - i] = ovl*window[9 + i] + sum*window[0 + i];
+            mp3d_real_t ovl  = overlap[i];
+            mp3d_real_t sum  = MP3D_MUL(co[i], g_twid9[9 + i]) + MP3D_MUL(si[i], g_twid9[0 + i]);
+            overlap[i] = MP3D_MUL(co[i], g_twid9[0 + i]) - MP3D_MUL(si[i], g_twid9[9 + i]);
+            grbuf[i]      = MP3D_MUL(ovl, window[0 + i]) - MP3D_MUL(sum, window[9 + i]);
+            grbuf[17 - i] = MP3D_MUL(ovl, window[9 + i]) + MP3D_MUL(sum, window[0 + i]);
         }
     }
 }
 
-static void L3_idct3(float x0, float x1, float x2, float *dst)
+static void L3_idct3(mp3d_real_t x0, mp3d_real_t x1, mp3d_real_t x2, mp3d_real_t *dst)
 {
-    float m1 = x1*0.86602540f;
-    float a1 = x0 - x2*0.5f;
+    mp3d_real_t m1 = MP3D_MUL_S(x1, 0.86602540);
+    mp3d_real_t a1 = x0 - MP3D_MUL_S(x2, 0.5);
     dst[1] = x0 + x2;
     dst[0] = a1 + m1;
     dst[2] = a1 - m1;
 }
 
-static void L3_imdct12(float *x, float *dst, float *overlap)
+static void L3_imdct12(mp3d_real_t *x, mp3d_real_t *dst, mp3d_real_t *overlap)
 {
-    static const float g_twid3[6] = { 0.79335334f,0.92387953f,0.99144486f, 0.60876143f,0.38268343f,0.13052619f };
-    float co[3], si[3];
+    static const mp3d_real_t g_twid3[6] = { MP3D_FIX(0.79335334),MP3D_FIX(0.92387953),MP3D_FIX(0.99144486), MP3D_FIX(0.60876143),MP3D_FIX(0.38268343),MP3D_FIX(0.13052619) };
+    mp3d_real_t co[3], si[3];
     int i;
 
     L3_idct3(-x[0], x[6] + x[3], x[12] + x[9], co);
@@ -1162,28 +1193,28 @@ static void L3_imdct12(float *x, float *dst, float *overlap)
 
     for (i = 0; i < 3; i++)
     {
-        float ovl  = overlap[i];
-        float sum  = co[i]*g_twid3[3 + i] + si[i]*g_twid3[0 + i];
-        overlap[i] = co[i]*g_twid3[0 + i] - si[i]*g_twid3[3 + i];
-        dst[i]     = ovl*g_twid3[2 - i] - sum*g_twid3[5 - i];
-        dst[5 - i] = ovl*g_twid3[5 - i] + sum*g_twid3[2 - i];
+        mp3d_real_t ovl  = overlap[i];
+        mp3d_real_t sum  = MP3D_MUL(co[i], g_twid3[3 + i]) + MP3D_MUL(si[i], g_twid3[0 + i]);
+        overlap[i] = MP3D_MUL(co[i], g_twid3[0 + i]) - MP3D_MUL(si[i], g_twid3[3 + i]);
+        dst[i]     = MP3D_MUL(ovl, g_twid3[2 - i]) - MP3D_MUL(sum, g_twid3[5 - i]);
+        dst[5 - i] = MP3D_MUL(ovl, g_twid3[5 - i]) + MP3D_MUL(sum, g_twid3[2 - i]);
     }
 }
 
-static void L3_imdct_short(float *grbuf, float *overlap, int nbands)
+static void L3_imdct_short(mp3d_real_t *grbuf, mp3d_real_t *overlap, int nbands)
 {
     for (;nbands > 0; nbands--, overlap += 9, grbuf += 18)
     {
-        float tmp[18];
+        mp3d_real_t tmp[18];
         memcpy(tmp, grbuf, sizeof(tmp));
-        memcpy(grbuf, overlap, 6*sizeof(float));
+        memcpy(grbuf, overlap, 6*sizeof(mp3d_real_t));
         L3_imdct12(tmp, grbuf + 6, overlap + 6);
         L3_imdct12(tmp + 1, grbuf + 12, overlap + 6);
         L3_imdct12(tmp + 2, overlap, overlap + 6);
     }
 }
 
-static void L3_change_sign(float *grbuf)
+static void L3_change_sign(mp3d_real_t *grbuf)
 {
     int b, i;
     for (b = 0, grbuf += 18; b < 32; b += 2, grbuf += 36)
@@ -1191,11 +1222,11 @@ static void L3_change_sign(float *grbuf)
             grbuf[i] = -grbuf[i];
 }
 
-static void L3_imdct_gr(float *grbuf, float *overlap, unsigned block_type, unsigned n_long_bands)
+static void L3_imdct_gr(mp3d_real_t *grbuf, mp3d_real_t *overlap, unsigned block_type, unsigned n_long_bands)
 {
-    static const float g_mdct_window[2][18] = {
-        { 0.99904822f,0.99144486f,0.97629601f,0.95371695f,0.92387953f,0.88701083f,0.84339145f,0.79335334f,0.73727734f,0.04361938f,0.13052619f,0.21643961f,0.30070580f,0.38268343f,0.46174861f,0.53729961f,0.60876143f,0.67559021f },
-        { 1,1,1,1,1,1,0.99144486f,0.92387953f,0.79335334f,0,0,0,0,0,0,0.13052619f,0.38268343f,0.60876143f }
+    static const mp3d_real_t g_mdct_window[2][18] = {
+        { MP3D_FIX(0.99904822),MP3D_FIX(0.99144486),MP3D_FIX(0.97629601),MP3D_FIX(0.95371695),MP3D_FIX(0.92387953),MP3D_FIX(0.88701083),MP3D_FIX(0.84339145),MP3D_FIX(0.79335334),MP3D_FIX(0.73727734),MP3D_FIX(0.04361938),MP3D_FIX(0.13052619),MP3D_FIX(0.21643961),MP3D_FIX(0.30070580),MP3D_FIX(0.38268343),MP3D_FIX(0.46174861),MP3D_FIX(0.53729961),MP3D_FIX(0.60876143),MP3D_FIX(0.67559021) },
+        { MP3D_ONE,MP3D_ONE,MP3D_ONE,MP3D_ONE,MP3D_ONE,MP3D_ONE,MP3D_FIX(0.99144486),MP3D_FIX(0.92387953),MP3D_FIX(0.79335334),0,0,0,0,0,0,MP3D_FIX(0.13052619),MP3D_FIX(0.38268343),MP3D_FIX(0.60876143) }
     };
     if (n_long_bands)
     {
@@ -1271,17 +1302,17 @@ static void L3_decode(mp3dec_t *h, mp3dec_scratch_t *s, L3_gr_info_t *gr_info, i
     }
 }
 
-static void mp3d_DCT_II(float *grbuf, int n)
+static void mp3d_DCT_II(mp3d_real_t *grbuf, int n)
 {
-    static const float g_sec[24] = {
-        10.19000816f,0.50060302f,0.50241929f,3.40760851f,0.50547093f,0.52249861f,2.05778098f,0.51544732f,0.56694406f,1.48416460f,0.53104258f,0.64682180f,1.16943991f,0.55310392f,0.78815460f,0.97256821f,0.58293498f,1.06067765f,0.83934963f,0.62250412f,1.72244716f,0.74453628f,0.67480832f,5.10114861f
+    static const mp3d_real_t g_sec[24] = {
+        MP3D_FIX(10.19000816),MP3D_FIX(0.50060302),MP3D_FIX(0.50241929),MP3D_FIX(3.40760851),MP3D_FIX(0.50547093),MP3D_FIX(0.52249861),MP3D_FIX(2.05778098),MP3D_FIX(0.51544732),MP3D_FIX(0.56694406),MP3D_FIX(1.48416460),MP3D_FIX(0.53104258),MP3D_FIX(0.64682180),MP3D_FIX(1.16943991),MP3D_FIX(0.55310392),MP3D_FIX(0.78815460),MP3D_FIX(0.97256821),MP3D_FIX(0.58293498),MP3D_FIX(1.06067765),MP3D_FIX(0.83934963),MP3D_FIX(0.62250412),MP3D_FIX(1.72244716),MP3D_FIX(0.74453628),MP3D_FIX(0.67480832),MP3D_FIX(5.10114861)
     };
     int i, k = 0;
 #if HAVE_SIMD
     if (have_simd()) for (; k < n; k += 4)
     {
         f4 t[4][8], *x;
-        float *y = grbuf + k;
+        mp3d_real_t *y = grbuf + k;
 
         for (x = t[0], i = 0; i < 8; i++, x++)
         {
@@ -1308,21 +1339,21 @@ static void mp3d_DCT_II(float *grbuf, int n)
             x4 = VSUB(x0, x3); x0 = VADD(x0, x3);
             x3 = VSUB(x1, x2); x1 = VADD(x1, x2);
             x[0] = VADD(x0, x1);
-            x[4] = VMUL_S(VSUB(x0, x1), 0.70710677f);
+            x[4] = VMUL_S(VSUB(x0, x1), MP3D_FIX(0.70710677));
             x5 = VADD(x5, x6);
-            x6 = VMUL_S(VADD(x6, x7), 0.70710677f);
+            x6 = VMUL_S(VADD(x6, x7), MP3D_FIX(0.70710677));
             x7 = VADD(x7, xt);
-            x3 = VMUL_S(VADD(x3, x4), 0.70710677f);
-            x5 = VSUB(x5, VMUL_S(x7, 0.198912367f)); /* rotate by PI/8 */
-            x7 = VADD(x7, VMUL_S(x5, 0.382683432f));
-            x5 = VSUB(x5, VMUL_S(x7, 0.198912367f));
+            x3 = VMUL_S(VADD(x3, x4), MP3D_FIX(0.70710677));
+            x5 = VSUB(x5, VMUL_S(x7, MP3D_FIX(0.198912367))); /* rotate by PI/8 */
+            x7 = VADD(x7, VMUL_S(x5, MP3D_FIX(0.382683432)));
+            x5 = VSUB(x5, VMUL_S(x7, MP3D_FIX(0.198912367)));
             x0 = VSUB(xt, x6); xt = VADD(xt, x6);
-            x[1] = VMUL_S(VADD(xt, x7), 0.50979561f);
-            x[2] = VMUL_S(VADD(x4, x3), 0.54119611f);
-            x[3] = VMUL_S(VSUB(x0, x5), 0.60134488f);
-            x[5] = VMUL_S(VADD(x0, x5), 0.89997619f);
-            x[6] = VMUL_S(VSUB(x4, x3), 1.30656302f);
-            x[7] = VMUL_S(VSUB(xt, x7), 2.56291556f);
+            x[1] = VMUL_S(VADD(xt, x7), MP3D_FIX(0.50979561));
+            x[2] = VMUL_S(VADD(x4, x3), MP3D_FIX(0.54119611));
+            x[3] = VMUL_S(VSUB(x0, x5), MP3D_FIX(0.60134488));
+            x[5] = VMUL_S(VADD(x0, x5), MP3D_FIX(0.89997619));
+            x[6] = VMUL_S(VSUB(x4, x3), MP3D_FIX(1.30656302));
+            x[7] = VMUL_S(VSUB(xt, x7), MP3D_FIX(2.56291556));
         }
 
         if (k > n - 3)
@@ -1367,26 +1398,26 @@ static void mp3d_DCT_II(float *grbuf, int n)
 #else /* MINIMP3_ONLY_SIMD */
     for (; k < n; k++)
     {
-        float t[4][8], *x, *y = grbuf + k;
+        mp3d_real_t t[4][8], *x, *y = grbuf + k;
 
         for (x = t[0], i = 0; i < 8; i++, x++)
         {
-            float x0 = y[i*18];
-            float x1 = y[(15 - i)*18];
-            float x2 = y[(16 + i)*18];
-            float x3 = y[(31 - i)*18];
-            float t0 = x0 + x3;
-            float t1 = x1 + x2;
-            float t2 = (x1 - x2)*g_sec[3*i + 0];
-            float t3 = (x0 - x3)*g_sec[3*i + 1];
+            mp3d_real_t x0 = y[i*18];
+            mp3d_real_t x1 = y[(15 - i)*18];
+            mp3d_real_t x2 = y[(16 + i)*18];
+            mp3d_real_t x3 = y[(31 - i)*18];
+            mp3d_real_t t0 = x0 + x3;
+            mp3d_real_t t1 = x1 + x2;
+            mp3d_real_t t2 = MP3D_MUL(x1 - x2, g_sec[3*i + 0]);
+            mp3d_real_t t3 = MP3D_MUL(x0 - x3, g_sec[3*i + 1]);
             x[0] = t0 + t1;
-            x[8] = (t0 - t1)*g_sec[3*i + 2];
+            x[8] = MP3D_MUL(t0 - t1, g_sec[3*i + 2]);
             x[16] = t3 + t2;
-            x[24] = (t3 - t2)*g_sec[3*i + 2];
+            x[24] = MP3D_MUL(t3 - t2, g_sec[3*i + 2]);
         }
         for (x = t[0], i = 0; i < 4; i++, x += 8)
         {
-            float x0 = x[0], x1 = x[1], x2 = x[2], x3 = x[3], x4 = x[4], x5 = x[5], x6 = x[6], x7 = x[7], xt;
+            mp3d_real_t x0 = x[0], x1 = x[1], x2 = x[2], x3 = x[3], x4 = x[4], x5 = x[5], x6 = x[6], x7 = x[7], xt;
             xt = x0 - x7; x0 += x7;
             x7 = x1 - x6; x1 += x6;
             x6 = x2 - x5; x2 += x5;
@@ -1394,21 +1425,21 @@ static void mp3d_DCT_II(float *grbuf, int n)
             x4 = x0 - x3; x0 += x3;
             x3 = x1 - x2; x1 += x2;
             x[0] = x0 + x1;
-            x[4] = (x0 - x1)*0.70710677f;
+            x[4] = MP3D_MUL_S(x0 - x1, 0.70710677);
             x5 =  x5 + x6;
-            x6 = (x6 + x7)*0.70710677f;
+            x6 = MP3D_MUL_S(x6 + x7, 0.70710677);
             x7 =  x7 + xt;
-            x3 = (x3 + x4)*0.70710677f;
-            x5 -= x7*0.198912367f;  /* rotate by PI/8 */
-            x7 += x5*0.382683432f;
-            x5 -= x7*0.198912367f;
+            x3 = MP3D_MUL_S(x3 + x4, 0.70710677);
+            x5 -= MP3D_MUL_S(x7, 0.198912367);  /* rotate by PI/8 */
+            x7 += MP3D_MUL_S(x5, 0.382683432);
+            x5 -= MP3D_MUL_S(x7, 0.198912367);
             x0 = xt - x6; xt += x6;
-            x[1] = (xt + x7)*0.50979561f;
-            x[2] = (x4 + x3)*0.54119611f;
-            x[3] = (x0 - x5)*0.60134488f;
-            x[5] = (x0 + x5)*0.89997619f;
-            x[6] = (x4 - x3)*1.30656302f;
-            x[7] = (xt - x7)*2.56291556f;
+            x[1] = MP3D_MUL_S(xt + x7, 0.50979561);
+            x[2] = MP3D_MUL_S(x4 + x3, 0.54119611);
+            x[3] = MP3D_MUL_S(x0 - x5, 0.60134488);
+            x[5] = MP3D_MUL_S(x0 + x5, 0.89997619);
+            x[6] = MP3D_MUL_S(x4 - x3, 1.30656302);
+            x[7] = MP3D_MUL_S(xt - x7, 2.56291556);
 
         }
         for (i = 0; i < 7; i++, y += 4*18)
@@ -1427,30 +1458,38 @@ static void mp3d_DCT_II(float *grbuf, int n)
 }
 
 #ifndef MINIMP3_FLOAT_OUTPUT
-static int16_t mp3d_scale_pcm(float sample)
+static int16_t mp3d_scale_pcm(mp3d_real_t sample)
 {
+#ifdef MINIMP3_FIXED_POINT
+    if (sample >= MP3D_FIX(32767.0)) return (int16_t)32767;
+    if (sample <= MP3D_FIX(-32768.0)) return (int16_t)-32768;
+    sample += MP3D_FIX(0.5);
+    sample -= (sample < 0 ? MP3D_ONE : 0);
+    return (int16_t)MP3D_TO_INT(sample);
+#else
 #if HAVE_ARMV6
-    int32_t s32 = (int32_t)(sample + .5f);
+    int32_t s32 = (int32_t)(sample + MP3D_FIX(.5));
     s32 -= (s32 < 0);
     int16_t s = (int16_t)minimp3_clip_int16_arm(s32);
 #else
-    if (sample >=  32766.5) return (int16_t) 32767;
-    if (sample <= -32767.5) return (int16_t)-32768;
-    int16_t s = (int16_t)(sample + .5f);
+    if (sample >=  MP3D_FIX(32766.5)) return (int16_t) 32767;
+    if (sample <= MP3D_FIX(-32767.5)) return (int16_t)-32768;
+    int16_t s = (int16_t)(sample + MP3D_FIX(.5));
     s -= (s < 0);   /* away from zero, to be compliant */
 #endif
     return s;
+#endif
 }
 #else /* MINIMP3_FLOAT_OUTPUT */
-static float mp3d_scale_pcm(float sample)
+static mp3d_real_t mp3d_scale_pcm(mp3d_real_t sample)
 {
-    return sample*(1.f/32768.f);
+    return MP3D_MUL(sample, MP3D_DIV(MP3D_ONE, 32768));
 }
 #endif /* MINIMP3_FLOAT_OUTPUT */
 
-static void mp3d_synth_pair(mp3d_sample_t *pcm, int nch, const float *z)
+static void mp3d_synth_pair(mp3d_sample_t *pcm, int nch, const mp3d_real_t *z)
 {
-    float a;
+    mp3d_real_t a;
     a  = (z[14*64] - z[    0]) * 29;
     a += (z[ 1*64] + z[13*64]) * 213;
     a += (z[12*64] - z[ 2*64]) * 459;
@@ -1473,13 +1512,13 @@ static void mp3d_synth_pair(mp3d_sample_t *pcm, int nch, const float *z)
     pcm[16*nch] = mp3d_scale_pcm(a);
 }
 
-static void mp3d_synth(float *xl, mp3d_sample_t *dstl, int nch, float *lins)
+static void mp3d_synth(mp3d_real_t *xl, mp3d_sample_t *dstl, int nch, mp3d_real_t *lins)
 {
     int i;
-    float *xr = xl + 576*(nch - 1);
+    mp3d_real_t *xr = xl + 576*(nch - 1);
     mp3d_sample_t *dstr = dstl + (nch - 1);
 
-    static const float g_win[] = {
+    static const mp3d_real_t g_win[] = {
         -1,26,-31,208,218,401,-519,2063,2000,4788,-5517,7134,5959,35640,-39336,74992,
         -1,24,-35,202,222,347,-581,2080,1952,4425,-5879,7640,5288,33791,-41176,74856,
         -1,21,-38,196,225,294,-645,2087,1893,4063,-6237,8092,4561,31947,-43006,74630,
@@ -1496,8 +1535,8 @@ static void mp3d_synth(float *xl, mp3d_sample_t *dstl, int nch, float *lins)
         -4,7,-91,117,177,-106,-1428,1698,402,545,-9416,9916,-7154,12980,-61289,66494,
         -5,6,-97,111,163,-127,-1498,1634,185,288,-9585,9838,-8540,11455,-62684,65290
     };
-    float *zlin = lins + 15*64;
-    const float *w = g_win;
+    mp3d_real_t *zlin = lins + 15*64;
+    const mp3d_real_t *w = g_win;
 
     zlin[4*15]     = xl[18*16];
     zlin[4*15 + 1] = xr[18*16];
@@ -1536,8 +1575,8 @@ static void mp3d_synth(float *xl, mp3d_sample_t *dstl, int nch, float *lins)
         {
 #ifndef MINIMP3_FLOAT_OUTPUT
 #if HAVE_SSE
-            static const f4 g_max = { 32767.0f, 32767.0f, 32767.0f, 32767.0f };
-            static const f4 g_min = { -32768.0f, -32768.0f, -32768.0f, -32768.0f };
+            static const f4 g_max = { MP3D_FIX(32767.0), MP3D_FIX(32767.0), MP3D_FIX(32767.0), MP3D_FIX(32767.0) };
+            static const f4 g_min = { MP3D_FIX(-32768.0), MP3D_FIX(-32768.0), MP3D_FIX(-32768.0), MP3D_FIX(-32768.0) };
             __m128i pcm8 = _mm_packs_epi32(_mm_cvtps_epi32(_mm_max_ps(_mm_min_ps(a, g_max), g_min)),
                                            _mm_cvtps_epi32(_mm_max_ps(_mm_min_ps(b, g_max), g_min)));
             dstr[(15 - i)*nch] = _mm_extract_epi16(pcm8, 1);
@@ -1550,8 +1589,8 @@ static void mp3d_synth(float *xl, mp3d_sample_t *dstl, int nch, float *lins)
             dstl[(49 + i)*nch] = _mm_extract_epi16(pcm8, 6);
 #else /* HAVE_SSE */
             int16x4_t pcma, pcmb;
-            a = VADD(a, VSET(0.5f));
-            b = VADD(b, VSET(0.5f));
+            a = VADD(a, VSET(MP3D_FIX(0.5)));
+            b = VADD(b, VSET(MP3D_FIX(0.5)));
             pcma = vqmovn_s32(vqaddq_s32(vcvtq_s32_f32(a), vreinterpretq_s32_u32(vcltq_f32(a, VSET(0)))));
             pcmb = vqmovn_s32(vqaddq_s32(vcvtq_s32_f32(b), vreinterpretq_s32_u32(vcltq_f32(b, VSET(0)))));
             vst1_lane_s16(dstr + (15 - i)*nch, pcma, 1);
@@ -1566,7 +1605,7 @@ static void mp3d_synth(float *xl, mp3d_sample_t *dstl, int nch, float *lins)
 
 #else /* MINIMP3_FLOAT_OUTPUT */
 
-            static const f4 g_scale = { 1.0f/32768.0f, 1.0f/32768.0f, 1.0f/32768.0f, 1.0f/32768.0f };
+            static const f4 g_scale = { MP3D_FIX(1.0)/MP3D_FIX(32768.0), MP3D_FIX(1.0)/MP3D_FIX(32768.0), MP3D_FIX(1.0)/MP3D_FIX(32768.0), MP3D_FIX(1.0)/MP3D_FIX(32768.0) };
             a = VMUL(a, g_scale);
             b = VMUL(b, g_scale);
 #if HAVE_SSE
@@ -1597,11 +1636,11 @@ static void mp3d_synth(float *xl, mp3d_sample_t *dstl, int nch, float *lins)
 #else /* MINIMP3_ONLY_SIMD */
     for (i = 14; i >= 0; i--)
     {
-#define LOAD(k) float w0 = *w++; float w1 = *w++; float *vz = &zlin[4*i - k*64]; float *vy = &zlin[4*i - (15 - k)*64];
-#define S0(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j]  = vz[j]*w1 + vy[j]*w0, a[j]  = vz[j]*w0 - vy[j]*w1; }
-#define S1(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j] += vz[j]*w1 + vy[j]*w0, a[j] += vz[j]*w0 - vy[j]*w1; }
-#define S2(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j] += vz[j]*w1 + vy[j]*w0, a[j] += vy[j]*w1 - vz[j]*w0; }
-        float a[4], b[4];
+#define LOAD(k) mp3d_real_t w0 = *w++; mp3d_real_t w1 = *w++; mp3d_real_t *vz = &zlin[4*i - k*64]; mp3d_real_t *vy = &zlin[4*i - (15 - k)*64];
+#define S0(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j]  = MP3D_MUL(vz[j], w1) + MP3D_MUL(vy[j], w0), a[j]  = MP3D_MUL(vz[j], w0) - MP3D_MUL(vy[j], w1); }
+#define S1(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j] += MP3D_MUL(vz[j], w1) + MP3D_MUL(vy[j], w0), a[j] += MP3D_MUL(vz[j], w0) - MP3D_MUL(vy[j], w1); }
+#define S2(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j] += MP3D_MUL(vz[j], w1) + MP3D_MUL(vy[j], w0), a[j] += MP3D_MUL(vy[j], w1) - MP3D_MUL(vz[j], w0); }
+        mp3d_real_t a[4], b[4];
 
         zlin[4*i]     = xl[18*(31 - i)];
         zlin[4*i + 1] = xr[18*(31 - i)];
@@ -1626,7 +1665,7 @@ static void mp3d_synth(float *xl, mp3d_sample_t *dstl, int nch, float *lins)
 #endif /* MINIMP3_ONLY_SIMD */
 }
 
-static void mp3d_synth_granule(float *qmf_state, float *grbuf, int nbands, int nch, mp3d_sample_t *pcm, float *lins)
+static void mp3d_synth_granule(mp3d_real_t *qmf_state, mp3d_real_t *grbuf, int nbands, int nch, mp3d_sample_t *pcm, mp3d_real_t *lins)
 {
     int i;
     for (i = 0; i < nch; i++)
@@ -1634,7 +1673,7 @@ static void mp3d_synth_granule(float *qmf_state, float *grbuf, int nbands, int n
         mp3d_DCT_II(grbuf + 576*i, nbands);
     }
 
-    memcpy(lins, qmf_state, sizeof(float)*15*64);
+    memcpy(lins, qmf_state, sizeof(mp3d_real_t)*15*64);
 
     for (i = 0; i < nbands; i += 2)
     {
@@ -1650,7 +1689,7 @@ static void mp3d_synth_granule(float *qmf_state, float *grbuf, int nbands, int n
     } else
 #endif /* MINIMP3_NONSTANDARD_BUT_LOGICAL */
     {
-        memcpy(qmf_state, lins + nbands*64, sizeof(float)*15*64);
+        memcpy(qmf_state, lins + nbands*64, sizeof(mp3d_real_t)*15*64);
     }
 }
 
@@ -1769,7 +1808,7 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
         {
             for (igr = 0; igr < (HDR_TEST_MPEG1(hdr) ? 2 : 1); igr++, pcm += 576*info->channels)
             {
-                memset(scratch.grbuf[0], 0, 576*2*sizeof(float));
+                memset(scratch.grbuf[0], 0, 576*2*sizeof(mp3d_real_t));
                 L3_decode(dec, &scratch, scratch.gr_info + igr*info->channels, info->channels);
                 mp3d_synth_granule(dec->qmf_state, scratch.grbuf[0], 18, info->channels, pcm, scratch.syn[0]);
             }
@@ -1783,7 +1822,7 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
         L12_scale_info sci[1];
         L12_read_scale_info(hdr, bs_frame, sci);
 
-        memset(scratch.grbuf[0], 0, 576*2*sizeof(float));
+        memset(scratch.grbuf[0], 0, 576*2*sizeof(mp3d_real_t));
         for (i = 0, igr = 0; igr < 3; igr++)
         {
             if (12 == (i += L12_dequantize_granule(scratch.grbuf[0] + i, bs_frame, sci, info->layer | 1)))
@@ -1791,7 +1830,7 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
                 i = 0;
                 L12_apply_scf_384(sci, sci->scf + igr, scratch.grbuf[0]);
                 mp3d_synth_granule(dec->qmf_state, scratch.grbuf[0], 12, info->channels, pcm, scratch.syn[0]);
-                memset(scratch.grbuf[0], 0, 576*2*sizeof(float));
+                memset(scratch.grbuf[0], 0, 576*2*sizeof(mp3d_real_t));
                 pcm += 384*info->channels;
             }
             if (bs_frame->pos > bs_frame->limit)
@@ -1806,19 +1845,19 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
 }
 
 #ifdef MINIMP3_FLOAT_OUTPUT
-void mp3dec_f32_to_s16(const float *in, int16_t *out, int num_samples)
+void mp3dec_f32_to_s16(const mp3d_real_t *in, int16_t *out, int num_samples)
 {
     int i = 0;
 #if HAVE_SIMD
     int aligned_count = num_samples & ~7;
     for(; i < aligned_count; i += 8)
     {
-        static const f4 g_scale = { 32768.0f, 32768.0f, 32768.0f, 32768.0f };
+        static const f4 g_scale = { MP3D_FIX(32768.0), MP3D_FIX(32768.0), MP3D_FIX(32768.0), MP3D_FIX(32768.0) };
         f4 a = VMUL(VLD(&in[i  ]), g_scale);
         f4 b = VMUL(VLD(&in[i+4]), g_scale);
 #if HAVE_SSE
-        static const f4 g_max = { 32767.0f, 32767.0f, 32767.0f, 32767.0f };
-        static const f4 g_min = { -32768.0f, -32768.0f, -32768.0f, -32768.0f };
+        static const f4 g_max = { MP3D_FIX(32767.0), MP3D_FIX(32767.0), MP3D_FIX(32767.0), MP3D_FIX(32767.0) };
+        static const f4 g_min = { MP3D_FIX(-32768.0), MP3D_FIX(-32768.0), MP3D_FIX(-32768.0), MP3D_FIX(-32768.0) };
         __m128i pcm8 = _mm_packs_epi32(_mm_cvtps_epi32(_mm_max_ps(_mm_min_ps(a, g_max), g_min)),
                                        _mm_cvtps_epi32(_mm_max_ps(_mm_min_ps(b, g_max), g_min)));
         out[i  ] = _mm_extract_epi16(pcm8, 0);
@@ -1831,8 +1870,8 @@ void mp3dec_f32_to_s16(const float *in, int16_t *out, int num_samples)
         out[i+7] = _mm_extract_epi16(pcm8, 7);
 #else /* HAVE_SSE */
         int16x4_t pcma, pcmb;
-        a = VADD(a, VSET(0.5f));
-        b = VADD(b, VSET(0.5f));
+        a = VADD(a, VSET(MP3D_FIX(0.5)));
+        b = VADD(b, VSET(MP3D_FIX(0.5)));
         pcma = vqmovn_s32(vqaddq_s32(vcvtq_s32_f32(a), vreinterpretq_s32_u32(vcltq_f32(a, VSET(0)))));
         pcmb = vqmovn_s32(vqaddq_s32(vcvtq_s32_f32(b), vreinterpretq_s32_u32(vcltq_f32(b, VSET(0)))));
         vst1_lane_s16(out+i  , pcma, 0);
@@ -1848,14 +1887,14 @@ void mp3dec_f32_to_s16(const float *in, int16_t *out, int num_samples)
 #endif /* HAVE_SIMD */
     for(; i < num_samples; i++)
     {
-        float sample = in[i] * 32768.0f;
-        if (sample >=  32766.5)
+        mp3d_real_t sample = in[i] * MP3D_FIX(32768.0);
+        if (sample >=  MP3D_FIX(32766.5))
             out[i] = (int16_t) 32767;
-        else if (sample <= -32767.5)
+        else if (sample <= MP3D_FIX(-32767.5))
             out[i] = (int16_t)-32768;
         else
         {
-            int16_t s = (int16_t)(sample + .5f);
+            int16_t s = (int16_t)(sample + MP3D_FIX(.5));
             s -= (s < 0);   /* away from zero, to be compliant */
             out[i] = s;
         }

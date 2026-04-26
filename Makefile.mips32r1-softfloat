@@ -1,0 +1,30 @@
+TOOLCHAIN_PREFIX ?= /opt/mipsel-mti-elf/bin/mipsel-mti-elf-
+CC := $(TOOLCHAIN_PREFIX)gcc
+AR := $(TOOLCHAIN_PREFIX)ar
+
+CFLAGS ?= -EL -march=mips32 -mtune=mips32 -msoft-float
+CFLAGS += -Os -G0 -mno-abicalls -fno-pic
+CFLAGS += -ffunction-sections -fdata-sections
+CFLAGS += -Wall -Wextra
+
+BUILD_DIR ?= build/mips32r1-softfloat
+TARGET := $(BUILD_DIR)/libminimp3_mips32r1_softfloat.a
+OBJ := $(BUILD_DIR)/minimp3.o
+
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(BUILD_DIR):
+	mkdir -p $@
+
+$(OBJ): minimp3_mips32r1_softfloat.c minimp3.h minimp3_mips32r1_softfloat.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(TARGET): $(OBJ)
+	$(AR) rcs $@ $<
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+-include $(OBJ:.o=.d)
