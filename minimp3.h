@@ -12,8 +12,10 @@
 
 #ifdef MINIMP3_FIXED_POINT
 typedef int32_t mp3d_real_t;
+typedef int64_t mp3d_synth_acc_t;
 #else
 typedef float mp3d_real_t;
+typedef float mp3d_synth_acc_t;
 #endif
 
 typedef struct
@@ -1471,7 +1473,7 @@ static void mp3d_DCT_II(mp3d_real_t *grbuf, int n)
 }
 
 #ifndef MINIMP3_FLOAT_OUTPUT
-static int16_t mp3d_scale_pcm(mp3d_real_t sample)
+static int16_t mp3d_scale_pcm(mp3d_synth_acc_t sample)
 {
 #ifdef MINIMP3_FIXED_POINT
     if (sample >= MP3D_FIX(32767.0)) return (int16_t)32767;
@@ -1494,7 +1496,7 @@ static int16_t mp3d_scale_pcm(mp3d_real_t sample)
 #endif
 }
 #else /* MINIMP3_FLOAT_OUTPUT */
-static mp3d_real_t mp3d_scale_pcm(mp3d_real_t sample)
+static mp3d_synth_acc_t mp3d_scale_pcm(mp3d_synth_acc_t sample)
 {
 #ifdef MINIMP3_FIXED_POINT
     return MP3D_SCALE_DOWN(sample, 15);
@@ -1506,7 +1508,7 @@ static mp3d_real_t mp3d_scale_pcm(mp3d_real_t sample)
 
 static void mp3d_synth_pair(mp3d_sample_t *pcm, int nch, const mp3d_real_t *z)
 {
-    mp3d_real_t a;
+    mp3d_synth_acc_t a;
     a  = (z[14*64] - z[    0]) * 29;
     a += (z[ 1*64] + z[13*64]) * 213;
     a += (z[12*64] - z[ 2*64]) * 459;
@@ -1657,7 +1659,7 @@ static void mp3d_synth(mp3d_real_t *xl, mp3d_sample_t *dstl, int nch, mp3d_real_
 #define S0(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j]  = MP3D_MUL(vz[j], w1) + MP3D_MUL(vy[j], w0), a[j]  = MP3D_MUL(vz[j], w0) - MP3D_MUL(vy[j], w1); }
 #define S1(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j] += MP3D_MUL(vz[j], w1) + MP3D_MUL(vy[j], w0), a[j] += MP3D_MUL(vz[j], w0) - MP3D_MUL(vy[j], w1); }
 #define S2(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j] += MP3D_MUL(vz[j], w1) + MP3D_MUL(vy[j], w0), a[j] += MP3D_MUL(vy[j], w1) - MP3D_MUL(vz[j], w0); }
-        mp3d_real_t a[4], b[4];
+        mp3d_synth_acc_t a[4], b[4];
 
         zlin[4*i]     = xl[18*(31 - i)];
         zlin[4*i + 1] = xr[18*(31 - i)];
