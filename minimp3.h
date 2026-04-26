@@ -11,7 +11,7 @@
 #define MINIMP3_MAX_SAMPLES_PER_FRAME (1152*2)
 
 #ifdef MINIMP3_FIXED_POINT
-typedef int32_t mp3d_real_t;
+typedef int64_t mp3d_real_t;
 typedef int64_t mp3d_synth_acc_t;
 #else
 typedef float mp3d_real_t;
@@ -58,10 +58,11 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
 #include <string.h>
 
 #ifdef MINIMP3_FIXED_POINT
-#define MP3D_FRAC_BITS 12
+#define MP3D_FRAC_BITS 24
 #define MP3D_ONE ((mp3d_real_t)(1 << MP3D_FRAC_BITS))
 #define MP3D_FIX(x) ((mp3d_real_t)((x) >= 0 ? ((x) * (double)(1 << MP3D_FRAC_BITS) + 0.5) : ((x) * (double)(1 << MP3D_FRAC_BITS) - 0.5)))
 #define MP3D_MUL(a, b) ((mp3d_real_t)(((int64_t)(a) * (b)) >> MP3D_FRAC_BITS))
+#define MP3D_MUL_I(a, b) ((mp3d_synth_acc_t)(a) * (b))
 #define MP3D_MUL_S(a, b) MP3D_MUL((a), MP3D_FIX(b))
 #define MP3D_DIV(a, b) ((mp3d_real_t)(((a) << MP3D_FRAC_BITS) / (b)))
 #define MP3D_FROM_INT(x) ((mp3d_real_t)(x) << MP3D_FRAC_BITS)
@@ -71,6 +72,7 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
 #define MP3D_ONE MP3D_FIX(1.0)
 #define MP3D_FIX(x) (x##f)
 #define MP3D_MUL(a, b) ((a) * (b))
+#define MP3D_MUL_I(a, b) ((a) * (b))
 #define MP3D_MUL_S(a, b) ((a) * (b##f))
 #define MP3D_DIV(a, b) ((a) / (b))
 #define MP3D_FROM_INT(x) ((mp3d_real_t)(x))
@@ -81,7 +83,9 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
 #ifdef MINIMP3_FIXED_POINT
 static mp3d_real_t mp3d_scale_down_var(mp3d_real_t x, int bits)
 {
-    return x >> bits;
+    while (bits-- > 0)
+        x >>= 1;
+    return x;
 }
 #else
 #define mp3d_scale_down_var(x, bits) MP3D_SCALE_DOWN((x), (bits))
@@ -1656,9 +1660,9 @@ static void mp3d_synth(mp3d_real_t *xl, mp3d_sample_t *dstl, int nch, mp3d_real_
     for (i = 14; i >= 0; i--)
     {
 #define LOAD(k) mp3d_real_t w0 = *w++; mp3d_real_t w1 = *w++; mp3d_real_t *vz = &zlin[4*i - k*64]; mp3d_real_t *vy = &zlin[4*i - (15 - k)*64];
-#define S0(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j]  = MP3D_MUL(vz[j], w1) + MP3D_MUL(vy[j], w0), a[j]  = MP3D_MUL(vz[j], w0) - MP3D_MUL(vy[j], w1); }
-#define S1(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j] += MP3D_MUL(vz[j], w1) + MP3D_MUL(vy[j], w0), a[j] += MP3D_MUL(vz[j], w0) - MP3D_MUL(vy[j], w1); }
-#define S2(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j] += MP3D_MUL(vz[j], w1) + MP3D_MUL(vy[j], w0), a[j] += MP3D_MUL(vy[j], w1) - MP3D_MUL(vz[j], w0); }
+#define S0(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j]  = MP3D_MUL_I(vz[j], w1) + MP3D_MUL_I(vy[j], w0), a[j]  = MP3D_MUL_I(vz[j], w0) - MP3D_MUL_I(vy[j], w1); }
+#define S1(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j] += MP3D_MUL_I(vz[j], w1) + MP3D_MUL_I(vy[j], w0), a[j] += MP3D_MUL_I(vz[j], w0) - MP3D_MUL_I(vy[j], w1); }
+#define S2(k) { int j; LOAD(k); for (j = 0; j < 4; j++) b[j] += MP3D_MUL_I(vz[j], w1) + MP3D_MUL_I(vy[j], w0), a[j] += MP3D_MUL_I(vy[j], w1) - MP3D_MUL_I(vz[j], w0); }
         mp3d_synth_acc_t a[4], b[4];
 
         zlin[4*i]     = xl[18*(31 - i)];
