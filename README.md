@@ -29,6 +29,12 @@ included, no CPU heat to address speedstep:
 
 Conformance test passed on all vectors (PSNR > 96db).
 
+## About this fork
+
+This fork is trimmed for little-endian MIPS32r1 soft-float targets. It keeps
+MP3 decoding only, removes SIMD/ARM-specific paths, and uses fixed-point
+integer arithmetic for the internal Layer III decode path.
+
 ## Comparison with keyj's [minimp3](https://keyj.emphy.de/minimp3/)
 
 Comparison by features:
