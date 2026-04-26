@@ -11,7 +11,7 @@
 #define MINIMP3_MAX_SAMPLES_PER_FRAME (1152*2)
 
 #ifdef MINIMP3_FIXED_POINT
-typedef int64_t mp3d_real_t;
+typedef int32_t mp3d_real_t;
 #else
 typedef float mp3d_real_t;
 #endif
@@ -56,10 +56,10 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
 #include <string.h>
 
 #ifdef MINIMP3_FIXED_POINT
-#define MP3D_FRAC_BITS 24
+#define MP3D_FRAC_BITS 12
 #define MP3D_ONE ((mp3d_real_t)(1 << MP3D_FRAC_BITS))
 #define MP3D_FIX(x) ((mp3d_real_t)((x) >= 0 ? ((x) * (double)(1 << MP3D_FRAC_BITS) + 0.5) : ((x) * (double)(1 << MP3D_FRAC_BITS) - 0.5)))
-#define MP3D_MUL(a, b) ((mp3d_real_t)(((a) * (b)) >> MP3D_FRAC_BITS))
+#define MP3D_MUL(a, b) ((mp3d_real_t)(((int64_t)(a) * (b)) >> MP3D_FRAC_BITS))
 #define MP3D_MUL_S(a, b) MP3D_MUL((a), MP3D_FIX(b))
 #define MP3D_DIV(a, b) ((mp3d_real_t)(((a) << MP3D_FRAC_BITS) / (b)))
 #define MP3D_FROM_INT(x) ((mp3d_real_t)(x) << MP3D_FRAC_BITS)
@@ -79,9 +79,7 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
 #ifdef MINIMP3_FIXED_POINT
 static mp3d_real_t mp3d_scale_down_var(mp3d_real_t x, int bits)
 {
-    while (bits-- > 0)
-        x >>= 1;
-    return x;
+    return x >> bits;
 }
 #else
 #define mp3d_scale_down_var(x, bits) MP3D_SCALE_DOWN((x), (bits))
